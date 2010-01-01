@@ -19,7 +19,7 @@ import logging
 import tornado.escape
 import tornado.web
 
-class WebSocketHandler(object):
+class WebSocketHandler(tornado.web.RequestHandler):
     """A request handler for HTML 5 Web Sockets.
 
     See http://www.w3.org/TR/2009/WD-websockets-20091222/ for details on the
@@ -57,7 +57,7 @@ class WebSocketHandler(object):
     This script pops up an alert box that says "You said: Hello, world".
     """
     def __init__(self, application, request):
-        self.request = request
+        tornado.web.RequestHandler.__init__(self, application, request)
         self.stream = request.connection.stream
 
     def _execute(self, transforms, *args, **kwargs):
@@ -127,3 +127,10 @@ class WebSocketHandler(object):
 
     def _on_end_delimiter(self, callback, frame):
         callback(frame[:-1].decode("utf-8", "replace"))
+
+    def _not_supported(self, *args, **kwargs):
+        raise Exception("Method not supported for Web Sockets")
+
+for method in ["write", "redirect", "set_header", "send_error", "set_cookie",
+               "set_status", "flush", "finish"]:
+    setattr(WebSocketHandler, method, WebSocketHandler._not_supported)

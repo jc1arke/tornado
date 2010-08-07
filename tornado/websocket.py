@@ -18,6 +18,9 @@ import functools
 import logging
 import tornado.escape
 import tornado.web
+import struct
+import hashlib
+import re
 
 class WebSocketHandler(tornado.web.RequestHandler):
     """A request handler for HTML 5 Web Sockets.
@@ -69,15 +72,115 @@ class WebSocketHandler(tornado.web.RequestHandler):
                 "HTTP/1.1 403 Forbidden\r\nContent-Length: " +
                 str(len(message)) + "\r\n\r\n" + message)
             return
-        self.stream.write(
-            "HTTP/1.1 101 Web Socket Protocol Handshake\r\n"
-            "Upgrade: WebSocket\r\n"
-            "Connection: Upgrade\r\n"
-            "Server: TornadoServer/0.1\r\n"
-            "WebSocket-Origin: " + self.request.headers["Origin"] + "\r\n"
-            "WebSocket-Location: ws://" + self.request.host +
-            self.request.path + "\r\n\r\n")
-        self.async_callback(self.open)(*args, **kwargs)
+        
+        if self.request.headers.get("Sec-WebSocket-Key1") and self.request.headers.get("Sec-WebSocket-Key2"):
+            self._return_hixie76()
+        else:
+            self._return_hixie75() 
+      
+        self.async_callback(self.open)(*args, **kwargs)  
+        
+    
+    def send_handshake(self, params):
+    
+        out = '''HTTP/1.1 101 Web Socket Protocol Handshake\r\nUpgrade: WebSocket\r\nConnection: Upgrade\r\nServer: TornadoServer/0.1\r\n'''
+    
+        response = {}
+        #response["HTTP/1.1 101 Web Socket Protocol Handshake"] = ""
+        #response["Upgrade"] = "WebSocket"
+        #response["Connection"] = "Upgrade"
+        #response["Server"] = "TornadoServer/0.1"
+    
+        if self.request.headers.get("Sec-WebSocket-Protocol"):
+            # We should really validate if passed protocol is valid or not
+            response["Sec-WebSocket-Protocol"] = self.request.headers.get("Sec-WebSocket-Protocol")
+        
+        response.update(params['headers'])    
+        out += "\r\n".join(["%s: %s" % (header, response[header]) for header in response])
+  
+        if params.get('data') is not None:      
+            out += "\r\n\r\n%s" % params['data']
+        else:
+            out += "\r\n\r\n"
+
+        #out = "HTTP/1.1 101 Web Socket Protocol Handshake\r\n" + out
+        self.stream.write(out)    
+
+
+
+    def _return_hixie75(self):
+        params = {}
+        params['headers'] = {}
+        params['headers']["WebSocket-Origin"] = self.request.headers["Origin"]
+        params['headers']["WebSocket-Location"] = "ws://%s%s" % (self.request.host, self.request.path)
+    
+        self.send_handshake(params) 
+    
+    
+    def _return_hixie76(self):        
+        '''First part of the hixie76 return.
+        The second bit lies in self._hixie76_challenge()'''
+        self.stream.read_bytes(8, self._hixie76_challenge)
+        
+               
+    
+    def _hixie76_challenge(self, bit):
+        '''Putting the hixie76 response together'''
+        params = {}
+        params['headers'] = {}
+        params['headers']["Sec-WebSocket-Origin"] = self.request.headers["Origin"]
+        params['headers']["Sec-WebSocket-Location"] = "ws://%s%s" % (self.request.host, self.request.path)
+        
+        key1 = self._get_key_value('Sec-Websocket-Key1')
+        if key1 is None:
+            raise Exception('Sec-WebSocket-Key1 not found')
+        key2 = self._get_key_value('Sec-Websocket-Key2')
+        if key2 is None:
+            raise Exception('Sec-WebSocket-Key2 not found')
+        # 5.2 8. let /challenge/ be the concatenation of /part_1/,
+        challenge = ""
+        challenge += struct.pack("!I", key1)  # network byteorder int
+        challenge += struct.pack("!I", key2)  # network byteorder int
+        challenge += bit # The trailing 8 bits of the challenge
+        
+        c = hashlib.md5()
+        c.update(challenge)
+        params['data'] = c.digest()
+
+        self.send_handshake(params)
+        
+    
+    def _get_key_value(self, key_field):
+        '''Ripped from pywebsocket by Google.
+        http://code.google.com/p/pywebsocket/source/browse/trunk/src/mod_pywebsocket/handshake/handshake.py
+        With some customisations to make it fit in current context.'''
+        key_value = self.request.headers.get(key_field)
+        if key_value is None:
+            logging.debug("no %s" % key_value)
+            return None
+        try:
+            # 5.2 4. let /key-number_n/ be the digits (characters in the range
+            # U+0030 DIGIT ZERO (0) to U+0039 DIGIT NINE (9)) in /key_n/,
+            # interpreted as a base ten integer, ignoring all other characters
+            # in /key_n/
+            key_number = int(re.sub("\\D", "", key_value))
+            # 5.2 5. let /spaces_n/ be the number of U+0020 SPACE characters
+            # in /key_n/.
+            spaces = re.subn(" ", "", key_value)[1]
+            # 5.2 6. if /key-number_n/ is not an integral multiple of /spaces_n/
+            # then abort the WebSocket connection.
+            if key_number % spaces != 0:
+                raise Exception('key_number %d is not an integral '
+                                     'multiple of spaces %d' % (key_number,
+                                                                spaces))
+            # 5.2 7. let /part_n/ be /key_number_n/ divided by /spaces_n/.
+            part = key_number / spaces
+            logging.debug("%s: %s => %d / %d => %d" % (
+                key_field, key_value, key_number, spaces, part))
+            return part
+        except:
+            return None
+                
 
     def write_message(self, message):
         """Sends the given message to the client of this Web Socket."""
